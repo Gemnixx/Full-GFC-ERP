@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" width="100%" height="100%">
+  <defs>
+    <!-- Metallic Gold Base Gradient -->
+    <linearGradient id="gold-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFF5B8"/>
+      <stop offset="20%" stop-color="#FCDD78"/>
+      <stop offset="50%" stop-color="#D4942B"/>
+      <stop offset="80%" stop-color="#A25B0E"/>
+      <stop offset="100%" stop-color="#5C2D01"/>
+    </linearGradient>
+
+    <!-- Outer 3D Extrusion Gradient -->
+    <linearGradient id="gold-edge" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#9C5D10"/>
+      <stop offset="50%" stop-color="#4F2600"/>
+      <stop offset="100%" stop-color="#240D00"/>
+    </linearGradient>
+
+    <!-- Top Highlight Bevel -->
+    <linearGradient id="gold-highlight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="30%" stop-color="#FFF0A3" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#B87B1E" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Red Bottom Banner Gradient -->
+    <linearGradient id="red-banner" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#EC2227"/>
+      <stop offset="50%" stop-color="#C81014"/>
+      <stop offset="100%" stop-color="#800305"/>
+    </linearGradient>
+
+    <!-- Subtle Drop Shadow -->
+    <filter id="3d-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="4" dy="8" stdDeviation="5" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#3d-shadow)">
+    <!-- ==================== 3D EXTRUSION BASE (DARK GOLD / BROWN) ==================== -->
+    <g fill="url(#gold-edge)">
+      <!-- G 3D Back -->
+      <path d="M 230 45 L 235 52 C 320 52 380 90 410 145 L 405 138 C 375 83 315 45 230 45 Z"/>
+      <path d="M 230 450 C 90 450 20 350 20 250 C 20 140 105 50 235 50 L 230 45 C 95 45 10 138 10 250 C 10 358 83 460 230 460 L 230 450 Z"/>
+      <!-- F 3D Back -->
+      <path d="M 370 45 L 630 45 L 625 52 L 375 52 L 375 452 L 370 452 Z"/>
+      <!-- C 3D Back -->
+      <path d="M 800 450 C 655 450 585 350 585 250 C 585 140 665 50 800 50 L 800 45 C 655 45 575 138 575 250 C 575 358 648 460 800 460 Z"/>
+    </g>
+
+    <!-- ==================== MAIN METALLIC GOLD LETTERS ==================== -->
+    <g fill="url(#gold-fill)" stroke="#5E3100" stroke-width="3">
+      <!-- LETTER 'G' -->
+      <path d="M 235 50 C 310 50 370 85 400 135 L 330 175 C 310 130 270 100 230 100 C 140 100 95 160 95 250 C 95 340 140 400 235 400 C 300 400 340 370 350 300 L 250 300 L 250 245 L 415 245 C 420 330 375 450 230 450 C 90 450 20 350 20 250 C 20 140 105 50 235 50 Z"/>
+
+      <!-- LETTER 'F' (Overlapping style as in G.F.C logo) -->
+      <path d="M 375 50 L 625 50 L 610 135 L 475 135 L 475 205 L 585 205 L 575 275 L 475 275 L 475 450 L 375 450 Z"/>
+
+      <!-- LETTER 'C' -->
+      <path d="M 800 50 C 880 50 945 90 980 155 L 910 195 C 885 140 850 100 800 100 C 710 100 665 160 665 250 C 665 340 710 400 800 400 C 860 400 900 360 925 310 L 995 350 C 955 420 885 450 800 450 C 655 450 585 350 585 250 C 585 140 665 50 800 50 Z"/>
+    </g>
+
+    <!-- ==================== ACCURATE LOGO DOTS (PERIODS) ==================== -->
+    <!-- Dot 1 (after G) -->
+    <g transform="translate(425, 415)">
+      <circle cx="0" cy="0" r="25" fill="url(#gold-fill)" stroke="#4A2500" stroke-width="3"/>
+      <circle cx="0" cy="0" r="14" fill="#6E3A02" stroke="#2B1200" stroke-width="2"/>
+      <circle cx="0" cy="0" r="6" fill="#D99B26"/>
+    </g>
+
+    <!-- Dot 2 (after F) -->
+    <g transform="translate(605, 415)">
+      <circle cx="0" cy="0" r="25" fill="url(#gold-fill)" stroke="#4A2500" stroke-width="3"/>
+      <circle cx="0" cy="0" r="14" fill="#6E3A02" stroke="#2B1200" stroke-width="2"/>
+      <circle cx="0" cy="0" r="6" fill="#D99B26"/>
+    </g>
+
+    <!-- Dot 3 (after C) -->
+    <g transform="translate(975, 415)">
+      <circle cx="0" cy="0" r="25" fill="url(#gold-fill)" stroke="#4A2500" stroke-width="3"/>
+      <circle cx="0" cy="0" r="14" fill="#6E3A02" stroke="#2B1200" stroke-width="2"/>
+      <circle cx="0" cy="0" r="6" fill="#D99B26"/>
+    </g>
+
+    <!-- ==================== HIGHLIGHT OVERLAYS FOR CHROME/GOLD SHINE ==================== -->
+    <path fill="url(#gold-highlight)" opacity="0.7" d="M 235 50 C 310 50 370 85 400 135 L 370 152 C 345 115 300 80 235 80 C 150 80 100 140 98 220 C 115 140 170 50 235 50 Z"/>
+    <path fill="url(#gold-highlight)" opacity="0.7" d="M 375 50 L 625 50 L 618 85 L 475 85 L 375 50 Z"/>
+    <path fill="url(#gold-highlight)" opacity="0.7" d="M 800 50 C 880 50 945 90 980 155 L 945 175 C 920 130 870 80 800 80 C 720 80 670 140 668 220 C 685 140 735 50 800 50 Z"/>
+
+    <!-- ==================== RED BOTTOM BANNER ("F A N S") ==================== -->
+    <!-- Red Box Frame -->
+    <rect x="20" y="455" width="960" height="95" rx="4" fill="url(#red-banner)" stroke="#500000" stroke-width="3"/>
+    <!-- Top Edge Highlight line on Red Bar -->
+    <line x1="22" y1="458" x2="978" y2="458" stroke="#FFA3A3" stroke-width="2" opacity="0.6"/>
+
+    <!-- Crisp White Bold "F A N S" Text -->
+    <g fill="#FFFFFF" stroke="#800000" stroke-width="1.5" font-family="'Arial Black', 'Impact', sans-serif" font-weight="900" font-size="62" letter-spacing="15">
+      <!-- Custom vector paths for F A N S for guaranteed rendering on all screens -->
+      <!-- F -->
+      <path d="M 110 480 L 155 480 L 155 498 L 132 498 L 132 512 L 150 512 L 150 528 L 132 528 L 132 550 L 110 550 Z"/>
+      <!-- A -->
+      <path d="M 330 480 L 354 480 L 376 550 L 353 550 L 348 534 L 324 534 L 319 550 L 298 550 Z M 328 518 L 344 518 L 336 496 Z"/>
+      <!-- N -->
+      <path d="M 550 480 L 571 480 L 594 526 L 594 480 L 615 480 L 615 550 L 594 550 L 571 504 L 571 550 L 550 550 Z"/>
+      <!-- S -->
+      <path d="M 800 498 C 800 486 812 478 830 478 C 848 478 860 487 860 500 L 839 500 C 838 494 835 492 830 492 C 825 492 821 494 821 497 C 821 501 825 503 836 506 C 854 511 862 517 862 529 C 862 543 848 552 830 552 C 810 552 798 542 797 528 L 818 528 C 819 535 824 538 830 538 C 837 538 841 535 841 530 C 841 525 836 523 825 520 C 809 515 800 509 800 498 Z"/>
+    </g>
+  </g>
+</svg>
