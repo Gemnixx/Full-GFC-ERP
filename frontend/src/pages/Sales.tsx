@@ -31,6 +31,8 @@ export default function Sales() {
       { key: 'customer', header: 'Customer', value: (r: any) => r.customer?.name || 'Walk-in' },
       { key: 'saleDate', header: 'Date & Time', value: (r: any) => formatDateTime(r.saleDate) },
       { key: 'items', header: 'Items', value: (r: any) => r.items.length },
+      { key: 'subtotal', header: 'Subtotal', value: (r: any) => r.subtotal ?? 0 },
+      { key: 'discount', header: 'Discount', value: (r: any) => r.discount ?? 0 },
       { key: 'total', header: 'Total' },
       { key: 'paid', header: 'Paid' },
       { key: 'due', header: 'Due' },
@@ -44,6 +46,19 @@ export default function Sales() {
     { key: 'customer', header: 'Customer', render: (r) => r.customer?.name || 'Walk-in' },
     { key: 'date', header: 'Date & Time', render: (r) => <span className="text-xs text-ink-secondary">{formatDateTime(r.saleDate)}</span> },
     { key: 'items', header: 'Items', align: 'center', render: (r) => r.items.length },
+
+    // Subtotal column
+    { key: 'subtotal', header: 'Subtotal', align: 'right', render: (r) => (
+      <span className="text-ink-secondary">Rs {formatMoney(r.subtotal ?? 0)}</span>
+    )},
+
+    // Discount column
+    { key: 'discount', header: 'Discount', align: 'right', render: (r) => (
+      Number(r.discount) > 0
+        ? <span className="text-rose-600 font-medium">− Rs {formatMoney(r.discount)}</span>
+        : <span className="text-ink-muted">—</span>
+    )},
+
     { key: 'total', header: 'Total', align: 'right', render: (r) => <span className="font-medium">Rs {formatMoney(r.total)}</span> },
     { key: 'paid', header: 'Paid', align: 'right', render: (r) => <span className="text-emerald-600">Rs {formatMoney(r.paid)}</span> },
     { key: 'due', header: 'Due', align: 'right', render: (r) => <span className={r.due > 0 ? 'text-amber-600 font-medium' : 'text-ink-muted'}>Rs {formatMoney(r.due)}</span> },

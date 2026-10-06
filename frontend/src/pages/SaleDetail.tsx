@@ -31,6 +31,7 @@ export default function SaleDetail() {
 
   if (!sale) return <div className="p-6"><Loader /></div>;
 
+  // ✅ Discount column hata diya
   const itemColumns: Column<any>[] = [
     { key: 'product', header: 'Product', render: (r) => (
       <div>
@@ -40,7 +41,6 @@ export default function SaleDetail() {
     )},
     { key: 'qty', header: 'Qty', align: 'center', render: (r) => r.quantity },
     { key: 'price', header: 'Unit Price', align: 'right', render: (r) => `Rs ${formatMoney(r.unitPrice)}` },
-    { key: 'disc', header: 'Discount', align: 'right', render: (r) => `Rs ${formatMoney(r.discount)}` },
     { key: 'total', header: 'Line Total', align: 'right', render: (r) => <span className="font-medium">Rs {formatMoney(r.lineTotal)}</span> },
   ];
 
