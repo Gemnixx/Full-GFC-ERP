@@ -111,10 +111,19 @@ model ColorMaster {
   createdAt DateTime @default(now())
 }
 
+// 👇 NAYA: Product Name Master
+model ProductMaster {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  createdAt DateTime  @default(now())
+  products  Product[]
+}
+
 model Product {
   id                  String               @id @default(cuid())
   name                String
   model               String?
+  productMasterId     String? // 👈 NAYA
   sku                 String?              @unique
   barcode             String?              @unique
   categoryId          String?
@@ -132,6 +141,7 @@ model Product {
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
   inventory           Inventory?
+  productMaster       ProductMaster?       @relation(fields: [productMasterId], references: [id]) // 👈 NAYA
   brand               Brand?               @relation(fields: [brandId], references: [id])
   category            Category?            @relation(fields: [categoryId], references: [id])
   unit                Unit?                @relation(fields: [unitId], references: [id])
@@ -145,23 +155,27 @@ model Product {
   @@index([categoryId])
   @@index([brandId])
   @@index([name])
+  @@index([productMasterId]) // 👈 NAYA
 }
 
 model ProductVariant {
-  id            String    @id @default(cuid())
-  productId     String
-  size          String?
-  color         String?
-  sku           String?   @unique
-  barcode       String?   @unique
-  stock         Int       @default(0)
-  purchasePrice Float     @default(0)
-  salePrice     Float     @default(0)
-  active        Boolean   @default(true)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  product       Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
-  saleItems     SaleItem[]
+  id                  String               @id @default(cuid())
+  productId           String
+  size                String?
+  color               String?
+  sku                 String?              @unique
+  barcode             String?              @unique
+  stock               Int                  @default(0)
+  purchasePrice       Float                @default(0)
+  salePrice           Float                @default(0)
+  active              Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  product             Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  saleItems           SaleItem[]
+  purchaseItems       PurchaseItem[]
+  salesReturnItems    SalesReturnItem[]
+  purchaseReturnItems PurchaseReturnItem[]
 
   @@unique([productId, size, color])
   @@index([productId])
@@ -307,18 +321,21 @@ model Purchase {
 }
 
 model PurchaseItem {
-  id            String   @id @default(cuid())
+  id            String          @id @default(cuid())
   purchaseId    String
   productId     String
+  variantId     String?
   quantity      Int
   purchasePrice Float
-  discount      Float    @default(0)
+  discount      Float           @default(0)
   lineTotal     Float
-  product       Product  @relation(fields: [productId], references: [id])
-  purchase      Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product       Product         @relation(fields: [productId], references: [id])
+  variant       ProductVariant? @relation(fields: [variantId], references: [id])
+  purchase      Purchase        @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
 
   @@index([purchaseId])
   @@index([productId])
+  @@index([variantId])
 }
 
 model SalesReturn {
@@ -343,14 +360,18 @@ model SalesReturn {
 }
 
 model SalesReturnItem {
-  id            String      @id @default(cuid())
+  id            String          @id @default(cuid())
   salesReturnId String
   productId     String
+  variantId     String?
   quantity      Int
   unitPrice     Float
   lineTotal     Float
-  product       Product     @relation(fields: [productId], references: [id])
-  salesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+  product       Product         @relation(fields: [productId], references: [id])
+  variant       ProductVariant? @relation(fields: [variantId], references: [id])
+  salesReturn   SalesReturn     @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+
+  @@index([variantId])
 }
 
 model PurchaseReturn {
@@ -375,14 +396,18 @@ model PurchaseReturn {
 }
 
 model PurchaseReturnItem {
-  id               String         @id @default(cuid())
+  id               String          @id @default(cuid())
   purchaseReturnId String
   productId        String
+  variantId        String?
   quantity         Int
   purchasePrice    Float
   lineTotal        Float
-  product          Product        @relation(fields: [productId], references: [id])
-  purchaseReturn   PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  product          Product         @relation(fields: [productId], references: [id])
+  variant          ProductVariant? @relation(fields: [variantId], references: [id])
+  purchaseReturn   PurchaseReturn  @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+
+  @@index([variantId])
 }
 
 model Payment {

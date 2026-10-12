@@ -23,6 +23,7 @@ const variantSchema = z.object({
 const productSchema = z.object({
   name: z.string().min(1),
   model: z.string().optional().nullable(),
+  productMasterId: z.string().optional().nullable(),   // 👈 NAYA
   sku: z.string().optional().nullable(),
   barcode: z.string().optional().nullable(),
   categoryId: z.string().optional().nullable(),
@@ -88,6 +89,22 @@ router.post('/meta/colors', requirePermission('PRODUCTS_CREATE'), async (req, re
   } catch (e) { next(e); }
 });
 
+// ===== Product Name Master (ProductMaster) =====
+router.get('/meta/product-names', async (_req, res, next) => {
+  try {
+    return ok(res, await prisma.productMaster.findMany({ orderBy: { name: 'asc' } }));
+  } catch (e) { next(e); }
+});
+router.post('/meta/product-names', requirePermission('PRODUCTS_CREATE'), async (req, res, next) => {
+  try {
+    const { name } = z.object({ name: z.string().min(1) }).parse(req.body);
+    const existing = await prisma.productMaster.findUnique({ where: { name: name.trim() } });
+    if (existing) return ok(res, existing, 'Product name already exists');
+    const pm = await prisma.productMaster.create({ data: { name: name.trim() } });
+    return ok(res, pm, 'Product name created', 201);
+  } catch (e) { next(e); }
+});
+
 // ===== List products =====
 router.get('/', async (req, res, next) => {
   try {
@@ -124,7 +141,23 @@ router.get('/', async (req, res, next) => {
     const [items, total] = await Promise.all([
       prisma.product.findMany({
         where,
-        include: { category: true, brand: true, inventory: true, variants: true },
+        include: {
+          category: true,
+          brand: true,
+          productMaster: true,               // 👈 NAYA
+          inventory: true,
+          variants: {
+            include: {
+              saleItems: {
+                select: { quantity: true },
+              },
+            },
+            orderBy: [{ size: 'asc' }, { color: 'asc' }],
+          },
+          saleItems: {
+            select: { quantity: true },
+          },
+        },
         orderBy: { createdAt: 'desc' },
         take, skip,
       }),
@@ -140,8 +173,28 @@ router.get('/:id', async (req, res, next) => {
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
       include: {
-        category: true, brand: true, unit: true, inventory: true,
-        variants: { orderBy: [{ size: 'asc' }, { color: 'asc' }] },
+        category: true,
+        brand: true,
+        unit: true,
+        productMaster: true,                 // 👈 NAYA
+        inventory: true,
+        variants: {
+          include: {
+            saleItems: {
+              select: { quantity: true, lineTotal: true, sale: { select: { saleDate: true, invoiceNumber: true } } },
+            },
+          },
+          orderBy: [{ size: 'asc' }, { color: 'asc' }],
+        },
+        saleItems: {
+          select: {
+            quantity: true,
+            lineTotal: true,
+            sale: { select: { saleDate: true, invoiceNumber: true } },
+          },
+          orderBy: { sale: { saleDate: 'desc' } },
+          take: 100,
+        },
         stockMovements: { orderBy: { createdAt: 'desc' }, take: 100 },
       },
     });
@@ -223,7 +276,17 @@ router.put('/:id', requirePermission('PRODUCTS_UPDATE'), async (req, res, next) 
 
         for (const ev of existing) {
           if (!incomingIds.has(ev.id)) {
-            await tx.productVariant.delete({ where: { id: ev.id } });
+            const saleCount = await tx.saleItem.count({
+              where: { variantId: ev.id },
+            });
+            if (saleCount > 0) {
+              await tx.productVariant.update({
+                where: { id: ev.id },
+                data: { active: false },
+              });
+            } else {
+              await tx.productVariant.delete({ where: { id: ev.id } });
+            }
           }
         }
 

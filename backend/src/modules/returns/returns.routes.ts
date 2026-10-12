@@ -21,28 +21,84 @@ router.get('/', async (req, res, next) => {
     const skip = (parseInt(page) - 1) * take;
 
     const salesReturns = type === 'PURCHASE' ? [] : await prisma.salesReturn.findMany({
-      include: { sale: true, customer: true },
+      include: {
+        sale: true,
+        customer: true,
+        user: { select: { fullName: true } },
+        // 👇 NAYA — items with product + variant details
+        items: {
+          include: {
+            product: true,
+            variant: true,
+          },
+        },
+      },
       orderBy: { returnDate: 'desc' },
     });
     const purchaseReturns = type === 'SALES' ? [] : await prisma.purchaseReturn.findMany({
-      include: { purchase: true, supplier: true },
+      include: {
+        purchase: true,
+        supplier: true,
+        user: { select: { fullName: true } },
+        // 👇 NAYA — items with product + variant details
+        items: {
+          include: {
+            product: true,
+            variant: true,
+          },
+        },
+      },
       orderBy: { returnDate: 'desc' },
     });
 
     const items = [
       ...salesReturns.map((r) => ({
-        id: r.id, returnNumber: r.returnNumber,
+        id: r.id,
+        returnNumber: r.returnNumber,
         reference: r.sale.invoiceNumber,
         party: r.customer?.name || 'Walk-in',
-        amount: r.total, type: 'SALES',
-        status: r.status, date: r.returnDate,
+        amount: r.total,
+        type: 'SALES',
+        status: r.status,
+        date: r.returnDate,
+        reason: r.reason,
+        refundMethod: r.refundMethod,
+        cashier: r.user?.fullName,
+        // 👇 NAYA — items detail
+        items: (r.items || []).map((it: any) => ({
+          id: it.id,
+          productName: it.product?.name,
+          model: it.product?.model,
+          size: it.variant?.size,
+          color: it.variant?.color,
+          quantity: it.quantity,
+          unitPrice: it.unitPrice,
+          lineTotal: it.lineTotal,
+        })),
       })),
       ...purchaseReturns.map((r) => ({
-        id: r.id, returnNumber: r.returnNumber,
+        id: r.id,
+        returnNumber: r.returnNumber,
         reference: r.purchase.purchaseNumber,
         party: r.supplier.name,
-        amount: r.total, type: 'PURCHASE',
-        status: r.status, date: r.returnDate,
+        amount: r.total,
+        type: 'PURCHASE',
+        status: r.status,
+        date: r.returnDate,
+        reason: r.reason,
+        refundMethod: r.refundMethod,
+        cashier: r.user?.fullName,
+        // 👇 NAYA — items detail
+        items: (r.items || []).map((it: any) => ({
+          id: it.id,
+          productName: it.product?.name,
+          model: it.product?.model,
+          size: it.variant?.size,
+          color: it.variant?.color,
+          quantity: it.quantity,
+          unitPrice: it.purchasePrice,
+          lineTotal: it.lineTotal,
+        })),
       })),
     ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
@@ -71,7 +127,7 @@ router.post('/sales', requirePermission('RETURNS_CREATE'), async (req, res, next
       async (tx) => {
         const sale = await tx.sale.findUnique({
           where: { id: data.saleId },
-          include: { items: { include: { product: true } } },
+          include: { items: { include: { product: true, variant: true } } },
         });
         if (!sale) throw new AppError('Sale not found', 404);
 
@@ -101,21 +157,39 @@ router.post('/sales', requirePermission('RETURNS_CREATE'), async (req, res, next
             data: {
               salesReturnId: salesReturn.id,
               productId: saleItem.productId,
+              variantId: saleItem.variantId || null,
               quantity: rItem.quantity,
               unitPrice: saleItem.unitPrice,
               lineTotal,
             },
           });
 
-          // Increase inventory + reverse WAC
+          // Variant stock increment
+          if (saleItem.variantId) {
+            await tx.productVariant.update({
+              where: { id: saleItem.variantId },
+              data: { stock: { increment: rItem.quantity } },
+            });
+          }
+
+          // Product inventory increment
           await tx.inventory.update({
             where: { productId: saleItem.productId },
             data: { quantity: { increment: rItem.quantity } },
           });
 
-          const wacResult = await applySalesReturnToWac(tx, saleItem.productId, rItem.quantity, saleItem.costAtSale || saleItem.wacAtSale);
+          // Reverse WAC
+          const wacResult = await applySalesReturnToWac(
+            tx,
+            saleItem.productId,
+            rItem.quantity,
+            saleItem.costAtSale || saleItem.wacAtSale,
+          );
 
-          const inv = await tx.inventory.findUnique({ where: { productId: saleItem.productId } });
+          const inv = await tx.inventory.findUnique({
+            where: { productId: saleItem.productId },
+          });
+
           await tx.stockMovement.create({
             data: {
               productId: saleItem.productId,
@@ -131,16 +205,39 @@ router.post('/sales', requirePermission('RETURNS_CREATE'), async (req, res, next
           });
         }
 
-        await tx.salesReturn.update({ where: { id: salesReturn.id }, data: { total } });
+        await tx.salesReturn.update({
+          where: { id: salesReturn.id },
+          data: { total },
+        });
 
-        // Accounting
+        // ============================================================
+        // LEDGER ADJUSTMENTS
+        // ============================================================
         if (data.refundMethod === 'CREDIT') {
           await postAccountTransaction(tx, [
             { code: '4100', debit: total, description: `Sales return ${returnNumber}` },
             { code: '1100', credit: total, description: `Sales return ${returnNumber}` },
           ]);
+
+          if (sale.customerId) {
+            await tx.customerPayment.create({
+              data: {
+                customerId: sale.customerId,
+                userId: req.user!.id,
+                amount: total,
+                method: 'CREDIT',
+                reference: returnNumber,
+                note: `Return adjustment against Sale ${sale.invoiceNumber}`,
+              },
+            });
+          }
         } else {
-          const cashCode = data.refundMethod === 'CASH' ? '1000' : data.refundMethod === 'BANK' ? '1010' : '1020';
+          const cashCode =
+            data.refundMethod === 'CASH'
+              ? '1000'
+              : data.refundMethod === 'BANK'
+                ? '1010'
+                : '1020';
           await postAccountTransaction(tx, [
             { code: '4100', debit: total, description: `Sales return ${returnNumber}` },
             { code: cashCode, credit: total, description: `Sales return ${returnNumber}` },
@@ -148,6 +245,28 @@ router.post('/sales', requirePermission('RETURNS_CREATE'), async (req, res, next
           await recordCashFlow(tx, {
             type: 'OUT', amount: total, method: data.refundMethod,
             description: `Sales return ${returnNumber}`, reference: returnNumber,
+          });
+
+          if (sale.customerId) {
+            await tx.customerPayment.create({
+              data: {
+                customerId: sale.customerId,
+                userId: req.user!.id,
+                amount: total,
+                method: data.refundMethod,
+                reference: returnNumber,
+                note: `Refund for Sale ${sale.invoiceNumber} return`,
+              },
+            });
+          }
+        }
+
+        // Auto-adjust sale.due
+        if (data.refundMethod === 'CREDIT' && sale.due > 0) {
+          const newDue = Math.max(sale.due - total, 0);
+          await tx.sale.update({
+            where: { id: sale.id },
+            data: { due: newDue },
           });
         }
 
@@ -181,7 +300,7 @@ router.post('/purchase', requirePermission('RETURNS_CREATE'), async (req, res, n
       async (tx) => {
         const purchase = await tx.purchase.findUnique({
           where: { id: data.purchaseId },
-          include: { items: true },
+          include: { items: { include: { product: true, variant: true } } },
         });
         if (!purchase) throw new AppError('Purchase not found', 404);
 
@@ -210,17 +329,29 @@ router.post('/purchase', requirePermission('RETURNS_CREATE'), async (req, res, n
             data: {
               purchaseReturnId: purchaseReturn.id,
               productId: pItem.productId,
+              variantId: pItem.variantId || null,
               quantity: rItem.quantity,
               purchasePrice: pItem.purchasePrice,
               lineTotal,
             },
           });
 
+          // Variant stock decrement
+          if (pItem.variantId) {
+            await tx.productVariant.update({
+              where: { id: pItem.variantId },
+              data: { stock: { decrement: rItem.quantity } },
+            });
+          }
+
+          // Product inventory decrement
           const inv = await tx.inventory.update({
             where: { productId: pItem.productId },
             data: { quantity: { decrement: rItem.quantity } },
           });
-          if (inv.quantity < 0) throw new AppError('Return would cause negative stock', 422);
+          if (inv.quantity < 0) {
+            throw new AppError('Return would cause negative stock', 422);
+          }
 
           const wacResult = await applyPurchaseReturnToWac(tx, pItem.productId, rItem.quantity);
           await tx.stockMovement.create({
@@ -238,36 +369,28 @@ router.post('/purchase', requirePermission('RETURNS_CREATE'), async (req, res, n
           });
         }
 
-        await tx.purchaseReturn.update({ where: { id: purchaseReturn.id }, data: { total } });
+        await tx.purchaseReturn.update({
+          where: { id: purchaseReturn.id },
+          data: { total },
+        });
 
-        // ============================================================
-        // NEW: Reduce purchase.due by the return amount (FIFO logic)
-        // ============================================================
-        // The return reduces what we owe the supplier for that specific purchase.
-        // If the return amount exceeds the current due (because we already paid it),
-        // then any excess becomes a "credit" — but for simplicity, we cap at purchase.due.
+        // Reduce purchase.due
         const purchaseDue = purchase.due;
         const reduceDueBy = Math.min(total, purchaseDue);
         if (reduceDueBy > 0) {
           await tx.purchase.update({
             where: { id: purchase.id },
-            data: {
-              due: { decrement: reduceDueBy },
-            },
+            data: { due: { decrement: reduceDueBy } },
           });
         }
-        // If total > purchaseDue, the extra amount is treated as a supplier credit
-        // (it will show as negative payable / advance in supplier ledger).
 
         // Accounting
         if (data.refundMethod === 'CREDIT') {
-          // Reduce AP (we no longer owe supplier for returned goods)
           await postAccountTransaction(tx, [
             { code: '2000', debit: total, description: `Purchase return ${returnNumber}` },
             { code: '1200', credit: total, description: `Purchase return ${returnNumber}` },
           ]);
         } else {
-          // Cash/Bank refund received from supplier
           const cashCode = data.refundMethod === 'CASH' ? '1000' : '1010';
           await postAccountTransaction(tx, [
             { code: cashCode, debit: total, description: `Purchase return ${returnNumber}` },

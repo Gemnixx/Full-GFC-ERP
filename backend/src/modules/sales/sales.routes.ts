@@ -15,17 +15,18 @@ router.use(authenticate);
 // ====== Schemas ======
 const saleItemSchema = z.object({
   productId: z.string(),
+  variantId: z.string().optional().nullable(),
   quantity: z.number().int().positive(),
   unitPrice: z.number().nonnegative(),
-  discount: z.number().nonnegative().default(0),          // rupees (backend calc karega)
-  discountPercent: z.number().min(0).max(100).default(0), // 👈 per-item %
+  discount: z.number().nonnegative().default(0),
+  discountPercent: z.number().min(0).max(100).default(0),
 });
 
 const saleSchema = z.object({
   customerId: z.string().optional().nullable(),
   items: z.array(saleItemSchema).min(1),
-  discount: z.number().nonnegative().default(0),           // summary discount in Rs (optional)
-  discountPercent: z.number().min(0).max(100).default(0),  // 👈 summary %
+  discount: z.number().nonnegative().default(0),
+  discountPercent: z.number().min(0).max(100).default(0),
   otherCharges: z.number().nonnegative().default(0),
   payments: z.array(z.object({
     method: z.enum(['CASH', 'BANK', 'CARD', 'CREDIT']),
@@ -59,7 +60,15 @@ router.get('/', async (req, res, next) => {
     const [items, total] = await Promise.all([
       prisma.sale.findMany({
         where,
-        include: { customer: true, items: true, user: { select: { fullName: true } } },
+        include: {
+          customer: true,
+          items: { include: { product: true, variant: true } },
+          // 👇 NAYA — returns ka summary list ke liye
+          salesReturns: {
+            select: { id: true, returnNumber: true, total: true, returnDate: true },
+          },
+          user: { select: { fullName: true } },
+        },
         orderBy: { saleDate: 'desc' },
         take, skip,
       }),
@@ -76,9 +85,18 @@ router.get('/:id', async (req, res, next) => {
       where: { id: req.params.id },
       include: {
         customer: true,
-        items: { include: { product: true } },
+        items: { include: { product: true, variant: true } },
         payments: true,
-        salesReturns: { include: { items: true } },
+        // 👇 NAYA — returns with full detail
+        salesReturns: {
+          include: {
+            items: {
+              include: { product: true, variant: true },
+            },
+            user: { select: { fullName: true } },
+          },
+          orderBy: { returnDate: 'desc' },
+        },
         user: { select: { fullName: true } },
       },
     });
@@ -87,7 +105,7 @@ router.get('/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ====== CREATE ======
+// ====== CREATE (same as before) ======
 router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
   try {
     const data = saleSchema.parse(req.body);
@@ -98,20 +116,28 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      // ---- Load products ----
+      const productIds = [...new Set(data.items.map((i) => i.productId))];
       const products = await tx.product.findMany({
-        where: { id: { in: data.items.map((i) => i.productId) } },
-        include: { inventory: true },
+        where: { id: { in: productIds } },
+        include: { inventory: true, variants: true },
       });
       const productMap = new Map(products.map((p) => [p.id, p]));
 
-      // ---- Validate + compute per-item discounts ----
+      const variantIds = data.items
+        .map((i) => i.variantId)
+        .filter(Boolean) as string[];
+      const variants = variantIds.length > 0
+        ? await tx.productVariant.findMany({ where: { id: { in: variantIds } } })
+        : [];
+      const variantMap = new Map(variants.map((v) => [v.id, v]));
+
       type LineCalc = {
         productId: string;
+        variantId: string | null;
         quantity: number;
         unitPrice: number;
         discountPercent: number;
-        discount: number;      // rupees
+        discount: number;
         lineGross: number;
         lineTotal: number;
       };
@@ -122,14 +148,38 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
         const p = productMap.get(item.productId);
         if (!p) throw new AppError(`Product not found: ${item.productId}`, 422);
 
-        const available = p.inventory?.quantity ?? 0;
+        let available = 0;
+
+        if (item.variantId) {
+          const v = variantMap.get(item.variantId);
+          if (!v) throw new AppError(`Variant not found: ${item.variantId}`, 422);
+          if (v.productId !== item.productId) {
+            throw new AppError(`Variant does not belong to product`, 422);
+          }
+          available = v.stock;
+        } else {
+          const activeVariants = p.variants.filter((v) => v.active);
+          if (activeVariants.length > 0) {
+            throw new AppError(
+              `Product "${p.name}" has variants. Please select size & color first.`,
+              422,
+            );
+          }
+          available = p.inventory?.quantity ?? 0;
+        }
+
         if (available < item.quantity) {
-          throw new AppError(`Insufficient stock for ${p.name}. Available: ${available}`, 422);
+          const label = item.variantId
+            ? `variant (stock: ${available})`
+            : `product (stock: ${available})`;
+          throw new AppError(
+            `Insufficient stock for ${p.name} ${label}. Requested: ${item.quantity}`,
+            422,
+          );
         }
 
         const lineGross = item.quantity * item.unitPrice;
 
-        // Dono source se discount nikaalo: percent se rupees, ya rupees se percent
         let discountPercent = item.discountPercent || 0;
         let discountRs = item.discount || 0;
 
@@ -141,7 +191,6 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
 
         const lineTotal = lineGross - discountRs;
 
-        // ---- Min sale price check ----
         const netUnitPrice = lineTotal / item.quantity;
         if (netUnitPrice < p.minSalePrice - 0.001) {
           throw new AppError(
@@ -152,6 +201,7 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
 
         lines.push({
           productId: item.productId,
+          variantId: item.variantId || null,
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           discountPercent: +discountPercent.toFixed(4),
@@ -161,12 +211,10 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
         });
       }
 
-      // ---- Totals ----
-      const subtotalGross = lines.reduce((s, l) => s + l.lineGross, 0);       // before any discount
-      const itemDiscountSum = lines.reduce((s, l) => s + l.discount, 0);      // sum of item discounts
-      const subtotalAfterItem = subtotalGross - itemDiscountSum;              // after item discounts
+      const subtotalGross = lines.reduce((s, l) => s + l.lineGross, 0);
+      const itemDiscountSum = lines.reduce((s, l) => s + l.discount, 0);
+      const subtotalAfterItem = subtotalGross - itemDiscountSum;
 
-      // Summary-level discount
       const summaryPercent = data.discountPercent || 0;
       let summaryDiscountRs = data.discount || 0;
       if (summaryPercent > 0) {
@@ -188,17 +236,16 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
       const methods = data.payments.filter((p) => p.method !== 'CREDIT').map((p) => p.method);
       const paymentMethod = methods.length === 0 ? 'CREDIT' : methods.length === 1 ? methods[0] : 'MIXED';
 
-      // ---- Create Sale ----
       const sale = await tx.sale.create({
         data: {
           invoiceNumber,
           customerId: data.customerId || null,
           userId: req.user!.id,
-          subtotal: +subtotalGross.toFixed(2),                   // gross
+          subtotal: +subtotalGross.toFixed(2),
           itemDiscount: +itemDiscountSum.toFixed(2),
           summaryDiscountPercent: +summaryPercent.toFixed(4),
           summaryDiscount: +summaryDiscountRs.toFixed(2),
-          discount: +totalDiscount.toFixed(2),                   // item + summary
+          discount: +totalDiscount.toFixed(2),
           otherCharges: data.otherCharges,
           total: +total.toFixed(2),
           paid: +totalPaid.toFixed(2),
@@ -211,7 +258,6 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
 
       let totalCogs = 0;
 
-      // ---- Create SaleItems + stock movement + WAC ----
       for (const line of lines) {
         const wacResult = await applySaleToWac(tx, line.productId, line.quantity);
         const wacAtSale = wacResult.wacAtSale;
@@ -221,6 +267,7 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
           data: {
             saleId: sale.id,
             productId: line.productId,
+            variantId: line.variantId,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discount: line.discount,
@@ -230,6 +277,13 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
             wacAtSale,
           },
         });
+
+        if (line.variantId) {
+          await tx.productVariant.update({
+            where: { id: line.variantId },
+            data: { stock: { decrement: line.quantity } },
+          });
+        }
 
         const inv = await tx.inventory.update({
           where: { productId: line.productId },
@@ -251,7 +305,6 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
         });
       }
 
-      // ---- Payments ----
       for (const p of data.payments) {
         if (p.method === 'CREDIT' || p.amount <= 0) continue;
         await tx.payment.create({ data: { saleId: sale.id, amount: p.amount, method: p.method } });
@@ -289,13 +342,15 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
       ipAddress: req.ip, userAgent: req.headers['user-agent'],
     });
 
-    // Fresh sale with items return karo
     const fullSale = await prisma.sale.findUnique({
       where: { id: result.id },
       include: {
         customer: true,
-        items: { include: { product: true } },
+        items: { include: { product: true, variant: true } },
         payments: true,
+        salesReturns: {
+          select: { id: true, returnNumber: true, total: true, returnDate: true },
+        },
         user: { select: { fullName: true } },
       },
     });
