@@ -41,7 +41,11 @@ router.get('/', async (req, res, next) => {
     const [customers, total] = await Promise.all([
       prisma.customer.findMany({
         where,
-        include: { sales: true, openingEntries: true },
+        include: {
+          sales: true,
+          salesReturns: true,      // 👈 NAYA
+          openingEntries: true,
+        },
         orderBy: { createdAt: 'desc' },
         take, skip,
       }),
@@ -53,6 +57,13 @@ router.get('/', async (req, res, next) => {
       const totalSales = c.sales.reduce((s, x) => s + x.total, 0);
       const salesDue = c.sales.reduce((s, x) => s + x.due, 0);
       const salesReceived = totalSales - salesDue;
+
+      // Returns
+      const totalReturns = c.salesReturns.reduce((s, r) => s + r.total, 0);    // 👈 NAYA
+      const returnCount = c.salesReturns.length;                               // 👈 NAYA
+
+      // Net sales due after returns
+      const netSalesDue = Math.max(salesDue - totalReturns, 0);
 
       // Opening balance calculation
       const openingTotal = c.openingEntries.reduce((s, x) => s + x.amount, 0);
@@ -67,19 +78,27 @@ router.get('/', async (req, res, next) => {
         active: c.active,
         totalSales,
         received: salesReceived + openingPaid,
-        salesDue,
+        salesDue: netSalesDue,
         openingDue,
         openingBalance: openingTotal,
-        balance: salesDue + openingDue,
+        balance: netSalesDue + openingDue,
+        totalReturns,   // 👈 NAYA
+        returnCount,    // 👈 NAYA
       };
     });
 
     const totalReceivable = items.reduce((s, i) => s + Math.max(i.balance, 0), 0);
+    const totalReturns = items.reduce((s, i) => s + i.totalReturns, 0);   // 👈 NAYA
     const activeCount = await prisma.customer.count({ where: { active: true } });
 
     return ok(res, {
       items, total,
-      summary: { totalCustomers: total, activeCustomers: activeCount, totalReceivable },
+      summary: {
+        totalCustomers: total,
+        activeCustomers: activeCount,
+        totalReceivable,
+        totalReturns,   // 👈 NAYA
+      },
     });
   } catch (e) { next(e); }
 });
@@ -92,7 +111,30 @@ router.get('/:id', async (req, res, next) => {
     const customer = await prisma.customer.findUnique({
       where: { id: req.params.id },
       include: {
-        sales: { orderBy: { saleDate: 'desc' }, take: 100, include: { items: true } },
+        sales: {
+          orderBy: { saleDate: 'desc' },
+          take: 100,
+          include: {
+            items: true,
+            // 👇 NAYA — sale ke saath returns bhi
+            salesReturns: {
+              select: { id: true, returnNumber: true, total: true, returnDate: true },
+            },
+          },
+        },
+        // 👇 NAYA — customer ke saare returns
+        salesReturns: {
+          orderBy: { returnDate: 'desc' },
+          take: 100,
+          include: {
+            items: {
+              include: { product: true, variant: true },
+            },
+            sale: {
+              select: { invoiceNumber: true },
+            },
+          },
+        },
         payments: { orderBy: { paymentDate: 'desc' }, take: 100 },
         openingEntries: true,
       },
@@ -104,14 +146,19 @@ router.get('/:id', async (req, res, next) => {
     const salesDue = customer.sales.reduce((s, x) => s + x.due, 0);
     const salesReceived = totalSales - salesDue;
 
+    // Returns
+    const totalReturns = customer.salesReturns.reduce((s, r) => s + r.total, 0);   // 👈 NAYA
+    const returnCount = customer.salesReturns.length;                              // 👈 NAYA
+    const netSalesDue = Math.max(salesDue - totalReturns, 0);
+
     // Opening
     const openingTotal = customer.openingEntries.reduce((s, x) => s + x.amount, 0);
     const openingPaid = customer.openingEntries.reduce((s, x) => s + x.paid, 0);
     const openingDue = openingTotal - openingPaid;
 
-    const outstanding = salesDue + openingDue;
+    const outstanding = netSalesDue + openingDue;
 
-    // Statement: opening entries first, then sales
+    // Statement: opening entries + sales + returns
     const statement: any[] = [
       ...customer.openingEntries.map((o) => ({
         date: o.entryDate,
@@ -128,6 +175,15 @@ router.get('/:id', async (req, res, next) => {
         debit: s.total,
         credit: s.total - s.due,
         type: 'SALE',
+      })),
+      // 👇 NAYA — returns as credit entries
+      ...customer.salesReturns.map((r) => ({
+        date: r.returnDate,
+        description: `Return ${r.returnNumber}`,
+        reference: r.returnNumber,
+        debit: 0,
+        credit: r.total,
+        type: 'RETURN',
       })),
     ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
@@ -146,6 +202,8 @@ router.get('/:id', async (req, res, next) => {
         openingPaid,
         received: salesReceived + openingPaid,
         outstanding,
+        totalReturns,   // 👈 NAYA
+        returnCount,    // 👈 NAYA
       },
       statement: statementWithBalance,
     });
@@ -160,12 +218,10 @@ router.post('/', requirePermission('CUSTOMERS_CREATE'), async (req, res, next) =
     const data = customerSchema.parse(req.body);
 
     const customer = await prisma.$transaction(async (tx) => {
-      // 1. Create customer with openingBalance = 0
       const created = await tx.customer.create({
         data: { ...data, openingBalance: 0 },
       });
 
-      // 2. If openingBalance > 0, create OpeningBalanceEntry + accounting entry
       if (data.openingBalance && data.openingBalance > 0) {
         await tx.openingBalanceEntry.create({
           data: {
@@ -190,13 +246,13 @@ router.post('/', requirePermission('CUSTOMERS_CREATE'), async (req, res, next) =
 });
 
 // ============================================================
-// UPDATE (prevent changing openingBalance directly)
+// UPDATE
 // ============================================================
 router.put('/:id', requirePermission('CUSTOMERS_UPDATE'), async (req, res, next) => {
   try {
     const data = customerSchema.partial().parse(req.body);
     const updateData: any = { ...data };
-    delete updateData.openingBalance;   // ← Prevent direct change
+    delete updateData.openingBalance;
 
     const customer = await prisma.customer.update({
       where: { id: req.params.id },
@@ -207,7 +263,7 @@ router.put('/:id', requirePermission('CUSTOMERS_UPDATE'), async (req, res, next)
 });
 
 // ============================================================
-// RECEIVE PAYMENT — Apply to Opening Balance first, then FIFO Sales
+// RECEIVE PAYMENT
 // ============================================================
 const paymentSchema = z.object({
   amount: z.number().positive(),
@@ -228,7 +284,6 @@ router.post('/:id/payments', requirePermission('CUSTOMERS_PAYMENT'), async (req,
         const customer = await tx.customer.findUnique({ where: { id: customerId } });
         if (!customer) throw new Error('Customer not found');
 
-        // 1. Create CustomerPayment record (for audit trail)
         const payment = await tx.customerPayment.create({
           data: {
             customerId,
@@ -242,7 +297,7 @@ router.post('/:id/payments', requirePermission('CUSTOMERS_PAYMENT'), async (req,
 
         let remaining = data.amount;
 
-        // 2. Apply to Opening Balance entries first (oldest first)
+        // Apply to Opening Balance entries first
         const openingEntries = await tx.openingBalanceEntry.findMany({
           where: { customerId },
           orderBy: { entryDate: 'asc' },
@@ -261,7 +316,7 @@ router.post('/:id/payments', requirePermission('CUSTOMERS_PAYMENT'), async (req,
           remaining -= applyAmount;
         }
 
-        // 3. Apply remaining to unpaid sales (FIFO)
+        // Apply remaining to unpaid sales (FIFO)
         if (remaining > 0) {
           const unpaidSales = await tx.sale.findMany({
             where: { customerId, due: { gt: 0 } },
@@ -284,7 +339,6 @@ router.post('/:id/payments', requirePermission('CUSTOMERS_PAYMENT'), async (req,
           }
         }
 
-        // 4. Accounting entries
         const cashCode = data.method === 'CASH' ? '1000' : data.method === 'BANK' ? '1010' : '1020';
         await postAccountTransaction(tx, [
           { code: cashCode, debit: data.amount, description: `Customer payment - ${customer.name}` },

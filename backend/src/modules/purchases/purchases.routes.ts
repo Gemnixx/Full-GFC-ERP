@@ -14,6 +14,7 @@ router.use(authenticate);
 
 const purchaseItemSchema = z.object({
   productId: z.string(),
+  variantId: z.string().optional().nullable(),
   quantity: z.number().int().positive(),
   purchasePrice: z.number().nonnegative(),
   discount: z.number().nonnegative().default(0),
@@ -57,7 +58,11 @@ router.get('/', async (req, res, next) => {
     const [items, total] = await Promise.all([
       prisma.purchase.findMany({
         where,
-        include: { supplier: true, items: true, user: { select: { fullName: true } } },
+        include: {
+          supplier: true,
+          items: { include: { product: true, variant: true } },
+          user: { select: { fullName: true } },
+        },
         orderBy: { purchaseDate: 'desc' },
         take, skip,
       }),
@@ -76,7 +81,7 @@ router.get('/:id', async (req, res, next) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
-        items: { include: { product: true } },
+        items: { include: { product: true, variant: true } },
         payments: true,
         purchaseReturns: { include: { items: true } },
         user: { select: { fullName: true } },
@@ -98,6 +103,45 @@ router.post('/', requirePermission('PURCHASES_CREATE'), async (req, res, next) =
       async (tx) => {
         const supplier = await tx.supplier.findUnique({ where: { id: data.supplierId } });
         if (!supplier) throw new AppError('Supplier not found', 422);
+
+        // Load products with variants for validation
+        const productIds = [...new Set(data.items.map((i) => i.productId))];
+        const products = await tx.product.findMany({
+          where: { id: { in: productIds } },
+          include: { inventory: true, variants: true },
+        });
+        const productMap = new Map(products.map((p) => [p.id, p]));
+
+        // Load variants
+        const variantIds = data.items
+          .map((i) => i.variantId)
+          .filter(Boolean) as string[];
+        const variants = variantIds.length > 0
+          ? await tx.productVariant.findMany({ where: { id: { in: variantIds } } })
+          : [];
+        const variantMap = new Map(variants.map((v) => [v.id, v]));
+
+        // Validate each item
+        for (const item of data.items) {
+          const p = productMap.get(item.productId);
+          if (!p) throw new AppError(`Product not found: ${item.productId}`, 422);
+
+          const activeVariants = p.variants.filter((v) => v.active);
+          if (activeVariants.length > 0 && !item.variantId) {
+            throw new AppError(
+              `Product "${p.name}" has variants. Please specify variantId.`,
+              422,
+            );
+          }
+
+          if (item.variantId) {
+            const v = variantMap.get(item.variantId);
+            if (!v) throw new AppError(`Variant not found: ${item.variantId}`, 422);
+            if (v.productId !== item.productId) {
+              throw new AppError(`Variant does not belong to product`, 422);
+            }
+          }
+        }
 
         const lineTotals = data.items.map((i) => i.quantity * i.purchasePrice - i.discount);
         const subtotal = lineTotals.reduce((a, b) => a + b, 0);
@@ -126,10 +170,12 @@ router.post('/', requirePermission('PURCHASES_CREATE'), async (req, res, next) =
         for (const item of data.items) {
           const lineTotal = item.quantity * item.purchasePrice - item.discount;
 
+          // Create PurchaseItem with variantId
           await tx.purchaseItem.create({
             data: {
               purchaseId: purchase.id,
               productId: item.productId,
+              variantId: item.variantId || null,
               quantity: item.quantity,
               purchasePrice: item.purchasePrice,
               discount: item.discount,
@@ -137,7 +183,15 @@ router.post('/', requirePermission('PURCHASES_CREATE'), async (req, res, next) =
             },
           });
 
-          // Increase inventory
+          // 👇 VARIANT STOCK INCREMENT
+          if (item.variantId) {
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { stock: { increment: item.quantity } },
+            });
+          }
+
+          // Product total inventory increment
           await tx.inventory.upsert({
             where: { productId: item.productId },
             create: { productId: item.productId, quantity: item.quantity },

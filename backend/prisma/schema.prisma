@@ -98,10 +98,32 @@ model Unit {
   products  Product[]
 }
 
+model SizeMaster {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+}
+
+model ColorMaster {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  hex       String?
+  createdAt DateTime @default(now())
+}
+
+// 👇 NAYA: Product Name Master
+model ProductMaster {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  createdAt DateTime  @default(now())
+  products  Product[]
+}
+
 model Product {
   id                  String               @id @default(cuid())
   name                String
   model               String?
+  productMasterId     String? // 👈 NAYA
   sku                 String?              @unique
   barcode             String?              @unique
   categoryId          String?
@@ -119,9 +141,11 @@ model Product {
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
   inventory           Inventory?
+  productMaster       ProductMaster?       @relation(fields: [productMasterId], references: [id]) // 👈 NAYA
   brand               Brand?               @relation(fields: [brandId], references: [id])
   category            Category?            @relation(fields: [categoryId], references: [id])
   unit                Unit?                @relation(fields: [unitId], references: [id])
+  variants            ProductVariant[]
   purchaseItems       PurchaseItem[]
   purchaseReturnItems PurchaseReturnItem[]
   saleItems           SaleItem[]
@@ -131,6 +155,30 @@ model Product {
   @@index([categoryId])
   @@index([brandId])
   @@index([name])
+  @@index([productMasterId]) // 👈 NAYA
+}
+
+model ProductVariant {
+  id                  String               @id @default(cuid())
+  productId           String
+  size                String?
+  color               String?
+  sku                 String?              @unique
+  barcode             String?              @unique
+  stock               Int                  @default(0)
+  purchasePrice       Float                @default(0)
+  salePrice           Float                @default(0)
+  active              Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  product             Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  saleItems           SaleItem[]
+  purchaseItems       PurchaseItem[]
+  salesReturnItems    SalesReturnItem[]
+  purchaseReturnItems PurchaseReturnItem[]
+
+  @@unique([productId, size, color])
+  @@index([productId])
 }
 
 model Customer {
@@ -193,27 +241,30 @@ model Supplier {
 }
 
 model Sale {
-  id            String        @id @default(cuid())
-  invoiceNumber String        @unique
-  customerId    String?
-  userId        String
-  saleDate      DateTime      @default(now())
-  subtotal      Float         @default(0)
-  discount      Float         @default(0)
-  otherCharges  Float         @default(0)
-  total         Float         @default(0)
-  paid          Float         @default(0)
-  due           Float         @default(0)
-  paymentMethod String        @default("CASH")
-  status        String        @default("COMPLETED")
-  notes         String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  payments      Payment[]
-  customer      Customer?     @relation(fields: [customerId], references: [id])
-  user          User          @relation(fields: [userId], references: [id])
-  items         SaleItem[]
-  salesReturns  SalesReturn[]
+  id                     String        @id @default(cuid())
+  invoiceNumber          String        @unique
+  customerId             String?
+  userId                 String
+  saleDate               DateTime      @default(now())
+  subtotal               Float         @default(0)
+  itemDiscount           Float         @default(0)
+  summaryDiscountPercent Float         @default(0)
+  summaryDiscount        Float         @default(0)
+  discount               Float         @default(0)
+  otherCharges           Float         @default(0)
+  total                  Float         @default(0)
+  paid                   Float         @default(0)
+  due                    Float         @default(0)
+  paymentMethod          String        @default("CASH")
+  status                 String        @default("COMPLETED")
+  notes                  String?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+  payments               Payment[]
+  customer               Customer?     @relation(fields: [customerId], references: [id])
+  user                   User          @relation(fields: [userId], references: [id])
+  items                  SaleItem[]
+  salesReturns           SalesReturn[]
 
   @@index([customerId])
   @@index([saleDate])
@@ -221,20 +272,24 @@ model Sale {
 }
 
 model SaleItem {
-  id         String  @id @default(cuid())
-  saleId     String
-  productId  String
-  quantity   Int
-  unitPrice  Float
-  discount   Float   @default(0)
-  lineTotal  Float
-  costAtSale Float   @default(0)
-  wacAtSale  Float   @default(0)
-  product    Product @relation(fields: [productId], references: [id])
-  sale       Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  id              String          @id @default(cuid())
+  saleId          String
+  productId       String
+  variantId       String?
+  quantity        Int
+  unitPrice       Float
+  discount        Float           @default(0)
+  discountPercent Float           @default(0)
+  lineTotal       Float
+  costAtSale      Float           @default(0)
+  wacAtSale       Float           @default(0)
+  product         Product         @relation(fields: [productId], references: [id])
+  variant         ProductVariant? @relation(fields: [variantId], references: [id])
+  sale            Sale            @relation(fields: [saleId], references: [id], onDelete: Cascade)
 
   @@index([saleId])
   @@index([productId])
+  @@index([variantId])
 }
 
 model Purchase {
@@ -266,18 +321,21 @@ model Purchase {
 }
 
 model PurchaseItem {
-  id            String   @id @default(cuid())
+  id            String          @id @default(cuid())
   purchaseId    String
   productId     String
+  variantId     String?
   quantity      Int
   purchasePrice Float
-  discount      Float    @default(0)
+  discount      Float           @default(0)
   lineTotal     Float
-  product       Product  @relation(fields: [productId], references: [id])
-  purchase      Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product       Product         @relation(fields: [productId], references: [id])
+  variant       ProductVariant? @relation(fields: [variantId], references: [id])
+  purchase      Purchase        @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
 
   @@index([purchaseId])
   @@index([productId])
+  @@index([variantId])
 }
 
 model SalesReturn {
@@ -302,14 +360,18 @@ model SalesReturn {
 }
 
 model SalesReturnItem {
-  id            String      @id @default(cuid())
+  id            String          @id @default(cuid())
   salesReturnId String
   productId     String
+  variantId     String?
   quantity      Int
   unitPrice     Float
   lineTotal     Float
-  product       Product     @relation(fields: [productId], references: [id])
-  salesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+  product       Product         @relation(fields: [productId], references: [id])
+  variant       ProductVariant? @relation(fields: [variantId], references: [id])
+  salesReturn   SalesReturn     @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+
+  @@index([variantId])
 }
 
 model PurchaseReturn {
@@ -334,14 +396,18 @@ model PurchaseReturn {
 }
 
 model PurchaseReturnItem {
-  id               String         @id @default(cuid())
+  id               String          @id @default(cuid())
   purchaseReturnId String
   productId        String
+  variantId        String?
   quantity         Int
   purchasePrice    Float
   lineTotal        Float
-  product          Product        @relation(fields: [productId], references: [id])
-  purchaseReturn   PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  product          Product         @relation(fields: [productId], references: [id])
+  variant          ProductVariant? @relation(fields: [variantId], references: [id])
+  purchaseReturn   PurchaseReturn  @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+
+  @@index([variantId])
 }
 
 model Payment {

@@ -12,17 +12,21 @@ import { auditLog } from '../../utils/audit';
 const router = Router();
 router.use(authenticate);
 
+// ====== Schemas ======
 const saleItemSchema = z.object({
   productId: z.string(),
+  variantId: z.string().optional().nullable(),
   quantity: z.number().int().positive(),
   unitPrice: z.number().nonnegative(),
   discount: z.number().nonnegative().default(0),
+  discountPercent: z.number().min(0).max(100).default(0),
 });
 
 const saleSchema = z.object({
   customerId: z.string().optional().nullable(),
   items: z.array(saleItemSchema).min(1),
   discount: z.number().nonnegative().default(0),
+  discountPercent: z.number().min(0).max(100).default(0),
   otherCharges: z.number().nonnegative().default(0),
   payments: z.array(z.object({
     method: z.enum(['CASH', 'BANK', 'CARD', 'CREDIT']),
@@ -31,6 +35,7 @@ const saleSchema = z.object({
   notes: z.string().optional(),
 });
 
+// ====== GET list ======
 router.get('/', async (req, res, next) => {
   try {
     const { search, from, to, paymentMethod, status, page = '1', pageSize = '20' } = req.query as any;
@@ -55,7 +60,15 @@ router.get('/', async (req, res, next) => {
     const [items, total] = await Promise.all([
       prisma.sale.findMany({
         where,
-        include: { customer: true, items: true, user: { select: { fullName: true } } },
+        include: {
+          customer: true,
+          items: { include: { product: true, variant: true } },
+          // 👇 NAYA — returns ka summary list ke liye
+          salesReturns: {
+            select: { id: true, returnNumber: true, total: true, returnDate: true },
+          },
+          user: { select: { fullName: true } },
+        },
         orderBy: { saleDate: 'desc' },
         take, skip,
       }),
@@ -65,15 +78,25 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ====== GET single ======
 router.get('/:id', async (req, res, next) => {
   try {
     const sale = await prisma.sale.findUnique({
       where: { id: req.params.id },
       include: {
         customer: true,
-        items: { include: { product: true } },
+        items: { include: { product: true, variant: true } },
         payments: true,
-        salesReturns: { include: { items: true } },
+        // 👇 NAYA — returns with full detail
+        salesReturns: {
+          include: {
+            items: {
+              include: { product: true, variant: true },
+            },
+            user: { select: { fullName: true } },
+          },
+          orderBy: { returnDate: 'desc' },
+        },
         user: { select: { fullName: true } },
       },
     });
@@ -82,6 +105,7 @@ router.get('/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ====== CREATE (same as before) ======
 router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
   try {
     const data = saleSchema.parse(req.body);
@@ -92,28 +116,117 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      // Load & validate products
+      const productIds = [...new Set(data.items.map((i) => i.productId))];
       const products = await tx.product.findMany({
-        where: { id: { in: data.items.map((i) => i.productId) } },
-        include: { inventory: true },
+        where: { id: { in: productIds } },
+        include: { inventory: true, variants: true },
       });
       const productMap = new Map(products.map((p) => [p.id, p]));
+
+      const variantIds = data.items
+        .map((i) => i.variantId)
+        .filter(Boolean) as string[];
+      const variants = variantIds.length > 0
+        ? await tx.productVariant.findMany({ where: { id: { in: variantIds } } })
+        : [];
+      const variantMap = new Map(variants.map((v) => [v.id, v]));
+
+      type LineCalc = {
+        productId: string;
+        variantId: string | null;
+        quantity: number;
+        unitPrice: number;
+        discountPercent: number;
+        discount: number;
+        lineGross: number;
+        lineTotal: number;
+      };
+
+      const lines: LineCalc[] = [];
+
       for (const item of data.items) {
         const p = productMap.get(item.productId);
         if (!p) throw new AppError(`Product not found: ${item.productId}`, 422);
-        const available = p.inventory?.quantity ?? 0;
+
+        let available = 0;
+
+        if (item.variantId) {
+          const v = variantMap.get(item.variantId);
+          if (!v) throw new AppError(`Variant not found: ${item.variantId}`, 422);
+          if (v.productId !== item.productId) {
+            throw new AppError(`Variant does not belong to product`, 422);
+          }
+          available = v.stock;
+        } else {
+          const activeVariants = p.variants.filter((v) => v.active);
+          if (activeVariants.length > 0) {
+            throw new AppError(
+              `Product "${p.name}" has variants. Please select size & color first.`,
+              422,
+            );
+          }
+          available = p.inventory?.quantity ?? 0;
+        }
+
         if (available < item.quantity) {
-          throw new AppError(`Insufficient stock for ${p.name}. Available: ${available}`, 422);
+          const label = item.variantId
+            ? `variant (stock: ${available})`
+            : `product (stock: ${available})`;
+          throw new AppError(
+            `Insufficient stock for ${p.name} ${label}. Requested: ${item.quantity}`,
+            422,
+          );
         }
-        if (item.unitPrice < p.minSalePrice) {
-          throw new AppError(`Price below minimum for ${p.name} (min ${p.minSalePrice})`, 422);
+
+        const lineGross = item.quantity * item.unitPrice;
+
+        let discountPercent = item.discountPercent || 0;
+        let discountRs = item.discount || 0;
+
+        if (discountPercent > 0) {
+          discountRs = (lineGross * discountPercent) / 100;
+        } else if (discountRs > 0) {
+          discountPercent = lineGross > 0 ? (discountRs / lineGross) * 100 : 0;
         }
+
+        const lineTotal = lineGross - discountRs;
+
+        const netUnitPrice = lineTotal / item.quantity;
+        if (netUnitPrice < p.minSalePrice - 0.001) {
+          throw new AppError(
+            `Discount too high for ${p.name}. Min unit price: ${p.minSalePrice}, after discount: ${netUnitPrice.toFixed(2)}`,
+            422
+          );
+        }
+
+        lines.push({
+          productId: item.productId,
+          variantId: item.variantId || null,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          discountPercent: +discountPercent.toFixed(4),
+          discount: +discountRs.toFixed(2),
+          lineGross,
+          lineTotal: +lineTotal.toFixed(2),
+        });
       }
 
-      const lineTotals = data.items.map((i) => i.quantity * i.unitPrice - i.discount);
-      const subtotal = lineTotals.reduce((a, b) => a + b, 0);
-      const total = subtotal - data.discount + data.otherCharges;
-      const totalPaid = data.payments.filter((p) => p.method !== 'CREDIT').reduce((s, p) => s + p.amount, 0);
+      const subtotalGross = lines.reduce((s, l) => s + l.lineGross, 0);
+      const itemDiscountSum = lines.reduce((s, l) => s + l.discount, 0);
+      const subtotalAfterItem = subtotalGross - itemDiscountSum;
+
+      const summaryPercent = data.discountPercent || 0;
+      let summaryDiscountRs = data.discount || 0;
+      if (summaryPercent > 0) {
+        summaryDiscountRs = (subtotalAfterItem * summaryPercent) / 100;
+      }
+
+      const totalDiscount = itemDiscountSum + summaryDiscountRs;
+      const total = Math.max(subtotalAfterItem - summaryDiscountRs + data.otherCharges, 0);
+
+      const totalPaid = data.payments
+        .filter((p) => p.method !== 'CREDIT')
+        .reduce((s, p) => s + p.amount, 0);
       const due = Math.max(total - totalPaid, 0);
 
       if (totalPaid > total + 0.01) throw new AppError('Paid amount exceeds total', 422);
@@ -128,56 +241,70 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
           invoiceNumber,
           customerId: data.customerId || null,
           userId: req.user!.id,
-          subtotal, discount: data.discount, otherCharges: data.otherCharges,
-          total, paid: totalPaid, due, paymentMethod,
-          notes: data.notes, status: 'COMPLETED',
+          subtotal: +subtotalGross.toFixed(2),
+          itemDiscount: +itemDiscountSum.toFixed(2),
+          summaryDiscountPercent: +summaryPercent.toFixed(4),
+          summaryDiscount: +summaryDiscountRs.toFixed(2),
+          discount: +totalDiscount.toFixed(2),
+          otherCharges: data.otherCharges,
+          total: +total.toFixed(2),
+          paid: +totalPaid.toFixed(2),
+          due: +due.toFixed(2),
+          paymentMethod,
+          notes: data.notes,
+          status: 'COMPLETED',
         },
       });
 
       let totalCogs = 0;
 
-      for (const item of data.items) {
-        const p = productMap.get(item.productId)!;
-        const lineTotal = item.quantity * item.unitPrice - item.discount;
-
-        const wacResult = await applySaleToWac(tx, item.productId, item.quantity);
+      for (const line of lines) {
+        const wacResult = await applySaleToWac(tx, line.productId, line.quantity);
         const wacAtSale = wacResult.wacAtSale;
-        totalCogs += wacAtSale * item.quantity;
+        totalCogs += wacAtSale * line.quantity;
 
         await tx.saleItem.create({
           data: {
             saleId: sale.id,
-            productId: item.productId,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-            discount: item.discount,
-            lineTotal,
+            productId: line.productId,
+            variantId: line.variantId,
+            quantity: line.quantity,
+            unitPrice: line.unitPrice,
+            discount: line.discount,
+            discountPercent: line.discountPercent,
+            lineTotal: line.lineTotal,
             costAtSale: wacAtSale,
             wacAtSale,
           },
         });
 
+        if (line.variantId) {
+          await tx.productVariant.update({
+            where: { id: line.variantId },
+            data: { stock: { decrement: line.quantity } },
+          });
+        }
+
         const inv = await tx.inventory.update({
-          where: { productId: item.productId },
-          data: { quantity: { decrement: item.quantity } },
+          where: { productId: line.productId },
+          data: { quantity: { decrement: line.quantity } },
         });
 
         await tx.stockMovement.create({
           data: {
-            productId: item.productId,
+            productId: line.productId,
             userId: req.user!.id,
             type: 'SALE',
-            quantity: -item.quantity,
+            quantity: -line.quantity,
             balance: inv.quantity,
             reference: invoiceNumber,
             unitCost: wacAtSale,
-            totalCost: wacAtSale * item.quantity,
+            totalCost: wacAtSale * line.quantity,
             runningWac: wacAtSale,
           },
         });
       }
 
-      // Non-credit payments
       for (const p of data.payments) {
         if (p.method === 'CREDIT' || p.amount <= 0) continue;
         await tx.payment.create({ data: { saleId: sale.id, amount: p.amount, method: p.method } });
@@ -215,7 +342,20 @@ router.post('/', requirePermission('SALES_CREATE'), async (req, res, next) => {
       ipAddress: req.ip, userAgent: req.headers['user-agent'],
     });
 
-    return ok(res, result, 'Sale completed', 201);
+    const fullSale = await prisma.sale.findUnique({
+      where: { id: result.id },
+      include: {
+        customer: true,
+        items: { include: { product: true, variant: true } },
+        payments: true,
+        salesReturns: {
+          select: { id: true, returnNumber: true, total: true, returnDate: true },
+        },
+        user: { select: { fullName: true } },
+      },
+    });
+
+    return ok(res, fullSale, 'Sale completed', 201);
   } catch (e) { next(e); }
 });
 
